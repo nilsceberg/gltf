@@ -219,6 +219,11 @@ impl Seek for FileResource {
 
 impl FileResource {
     /// TODO
+    pub fn new(file: File, media_type: Option<&'static str>) -> Self {
+        FileResource { file, media_type }
+    }
+
+    /// TODO
     pub fn path_and_media_type(uri: &Url) -> Result<(PathBuf, Option<&'static str>)> {
         let path = uri.to_file_path().map_err(|_| Error::UnsupportedScheme)?;
 
