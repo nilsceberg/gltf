@@ -29,6 +29,7 @@ byteorder = "1.3"
 gltf-json = { path = "gltf-json", version = "=1.4.1" }
 urlencoding = { optional = true, version = "2.1" }
 serde_json = { features = ["raw_value"], version = "1.0" }
+url = { optional=true, version = "2.5.2"}
 
 [dependencies.image]
 default-features = false
@@ -44,7 +45,7 @@ extensions = ["gltf-json/extensions"]
 extras = ["gltf-json/extras"]
 names = ["gltf-json/names"]
 utils = []
-import = ["base64", "image", "urlencoding"]
+import = ["base64", "image", "urlencoding", "url"]
 KHR_lights_punctual = ["gltf-json/KHR_lights_punctual"]
 KHR_materials_pbrSpecularGlossiness = ["gltf-json/KHR_materials_pbrSpecularGlossiness"]
 KHR_materials_unlit = ["gltf-json/KHR_materials_unlit"]

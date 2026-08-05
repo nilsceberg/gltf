@@ -171,6 +171,9 @@ pub use self::import::import_images;
 #[cfg(feature = "import")]
 #[doc(inline)]
 pub use self::import::import_slice;
+#[cfg(feature = "import")]
+#[doc(inline)]
+pub use self::import::{DataResource, FileResource, Importer, ImporterExt};
 #[doc(inline)]
 pub use self::material::Material;
 #[doc(inline)]
@@ -222,6 +225,11 @@ pub enum Error {
 
     /// Standard I/O error.
     Io(io::Error),
+
+    /// URI parsing error.
+    #[cfg(feature = "import")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "import")))]
+    Uri(url::ParseError),
 
     /// Image decoding error.
     #[cfg(feature = "import")]
@@ -593,6 +601,8 @@ impl std::fmt::Display for Error {
             }
             Error::Deserialize(ref e) => e.fmt(f),
             Error::Io(ref e) => e.fmt(f),
+            #[cfg(feature = "import")]
+            Error::Uri(ref e) => e.fmt(f),
             #[cfg(feature = "import")]
             Error::Image(ref e) => e.fmt(f),
             #[cfg(feature = "import")]

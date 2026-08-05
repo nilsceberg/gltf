@@ -1,88 +1,283 @@
 use crate::buffer;
 use crate::image;
 use std::borrow::Cow;
+use std::env::current_dir;
+use std::fs::File;
+use std::io::Cursor;
+use std::io::Read;
+use std::io::Seek;
 use std::{fs, io};
 
 use crate::{Document, Error, Gltf, Result};
+use image_crate::ImageFormat;
 #[cfg(feature = "EXT_texture_webp")]
 use image_crate::ImageFormat::WebP;
 use image_crate::ImageFormat::{Jpeg, Png};
 use std::path::Path;
+use url::Url;
 
 /// Return type of `import`.
 type Import = (Document, Vec<buffer::Data>, Vec<image::Data>);
 
-/// Represents the set of URI schemes the importer supports.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-enum Scheme<'a> {
-    /// `data:[<media type>];base64,<data>`.
-    Data(Option<&'a str>, &'a str),
-
-    /// `file:[//]<absolute file path>`.
-    ///
-    /// Note: The file scheme does not implement authority.
-    File(&'a str),
-
-    /// `../foo`, etc.
-    Relative(Cow<'a, str>),
-
-    /// Placeholder for an unsupported URI scheme identifier.
-    Unsupported,
+/// TODO
+pub trait Importer: Sized {
+    /// TODO
+    fn open(&self, uri: &Url) -> Result<impl Resource>;
+    /// TODO
+    fn base(&self) -> &Url;
 }
 
-impl<'a> Scheme<'a> {
-    fn parse(uri: &str) -> Scheme<'_> {
-        if uri.contains(':') {
-            if let Some(rest) = uri.strip_prefix("data:") {
-                let mut it = rest.split(";base64,");
+/// TODO
+pub trait ImporterExt: Importer {
+    /// TODO
+    fn resolve(&self, uri: &str, base: Option<&Url>) -> Result<Url> {
+        // TODO: the error here should probably be related to the slice thingy
+        base.unwrap_or(self.base()).join(uri).map_err(Error::Uri)
+    }
 
-                match (it.next(), it.next()) {
-                    (match0_opt, Some(match1)) => Scheme::Data(match0_opt, match1),
-                    (Some(match0), _) => Scheme::Data(None, match0),
-                    _ => Scheme::Unsupported,
-                }
-            } else if let Some(rest) = uri.strip_prefix("file://") {
-                Scheme::File(rest)
-            } else if let Some(rest) = uri.strip_prefix("file:") {
-                Scheme::File(rest)
-            } else {
-                Scheme::Unsupported
+    /// TODO
+    fn import(&self, uri: &str) -> Result<Import> {
+        let uri = self.resolve(uri, None)?;
+        let resource = self.open(&uri)?;
+        let document = Gltf::from_reader(resource.seekable())?;
+        self.import_resources(document, Some(&uri))
+    }
+
+    /// TODO
+    fn import_buffers(
+        &self,
+        document: &Document,
+        base: Option<&Url>,
+        mut blob: Option<Vec<u8>>,
+    ) -> Result<Vec<buffer::Data>> {
+        let mut buffers = Vec::new();
+        for buffer in document.buffers() {
+            let data =
+                buffer::Data::import_from_source_and_blob(self, buffer.source(), base, &mut blob)?;
+            if data.len() < buffer.length() {
+                return Err(Error::BufferLength {
+                    buffer: buffer.index(),
+                    expected: buffer.length(),
+                    actual: data.len(),
+                });
             }
-        } else {
-            match urlencoding::decode(uri) {
-                Ok(decoded) => Scheme::Relative(decoded),
-                Err(_) => Scheme::Unsupported,
-            }
+            buffers.push(data);
+        }
+        Ok(buffers)
+    }
+
+    /// TODO: doc
+    fn import_images(
+        &self,
+        document: &Document,
+        base: Option<&Url>,
+        buffer_data: &[buffer::Data],
+    ) -> Result<Vec<image::Data>> {
+        let mut images = Vec::new();
+        for image in document.images() {
+            images.push(image::Data::import_from_source(
+                self,
+                image.source(),
+                base,
+                buffer_data,
+            )?);
+        }
+        Ok(images)
+    }
+
+    /// TODO: doc
+    fn import_resources(
+        &self,
+        Gltf { document, blob }: Gltf,
+        base: Option<&Url>,
+    ) -> Result<Import> {
+        let buffer_data = self.import_buffers(&document, base, blob)?;
+        let image_data = self.import_images(&document, base, &buffer_data)?;
+        let import = (document, buffer_data, image_data);
+        Ok(import)
+    }
+}
+
+impl<T: Importer> ImporterExt for T {}
+
+pub trait Resource: Read {
+    fn media_type(&self) -> Option<&str>;
+    fn seekable(self) -> impl Read + Seek;
+
+    fn into_bytes(mut self) -> io::Result<Vec<u8>>
+    where
+        Self: Sized,
+    {
+        let mut buf = Vec::new();
+        Read::read_to_end(&mut self, &mut buf)?;
+        Ok(buf)
+    }
+}
+
+/// TODO: doc
+pub struct DataResource<'a> {
+    media_type: Option<&'a str>,
+    data: Cursor<Vec<u8>>,
+}
+
+impl Read for DataResource<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.data.read(buf)
+    }
+}
+
+impl Seek for DataResource<'_> {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        self.data.seek(pos)
+    }
+}
+
+/// TODO: doc
+pub struct FileResource<'a> {
+    extension: Option<&'a str>,
+    file: File,
+}
+
+enum DefaultResource<'a> {
+    Data(DataResource<'a>),
+    File(FileResource<'a>),
+}
+
+impl Read for FileResource<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.file.read(buf)
+    }
+}
+
+impl Seek for FileResource<'_> {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        self.file.seek(pos)
+    }
+}
+
+impl Resource for DataResource<'_> {
+    fn media_type(&self) -> Option<&str> {
+        self.media_type
+    }
+
+    fn seekable(self) -> impl Read + Seek {
+        self
+    }
+}
+
+impl Resource for FileResource<'_> {
+    fn media_type(&self) -> Option<&str> {
+        match self.extension {
+            Some("jpg") | Some("jpeg") => Some("image/jpeg"),
+            Some("png") => Some("image/png"),
+            #[cfg(feature = "EXT_texture_webp")]
+            Some("webp") => Some("image/webp"),
+            _ => None,
         }
     }
 
-    fn read(base: Option<&Path>, uri: &str) -> Result<Vec<u8>> {
-        match Scheme::parse(uri) {
-            // The path may be unused in the Scheme::Data case
-            // Example: "uri" : "data:application/octet-stream;base64,wsVHPgA...."
-            Scheme::Data(_, base64) => base64::decode(base64).map_err(Error::Base64),
-            Scheme::File(path) if base.is_some() => read_to_end(path),
-            Scheme::Relative(path) if base.is_some() => read_to_end(base.unwrap().join(&*path)),
-            Scheme::Unsupported => Err(Error::UnsupportedScheme),
-            _ => Err(Error::ExternalReferenceInSliceImport),
+    fn seekable(self) -> impl Read + Seek {
+        self
+    }
+}
+
+impl Read for DefaultResource<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            DefaultResource::Data(data) => data.read(buf),
+            DefaultResource::File(file) => file.read(buf),
         }
     }
 }
 
-fn read_to_end<P>(path: P) -> Result<Vec<u8>>
-where
-    P: AsRef<Path>,
-{
-    use io::Read;
-    let file = fs::File::open(path.as_ref()).map_err(Error::Io)?;
-    // Allocate one extra byte so the buffer doesn't need to grow before the
-    // final `read` call at the end of the file.  Don't worry about `usize`
-    // overflow because reading will fail regardless in that case.
-    let length = file.metadata().map(|x| x.len() + 1).unwrap_or(0);
-    let mut reader = io::BufReader::new(file);
-    let mut data = Vec::with_capacity(length as usize);
-    reader.read_to_end(&mut data).map_err(Error::Io)?;
-    Ok(data)
+impl Seek for DefaultResource<'_> {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        match self {
+            DefaultResource::Data(data) => data.seek(pos),
+            DefaultResource::File(file) => file.seek(pos),
+        }
+    }
+}
+
+impl Resource for DefaultResource<'_> {
+    fn media_type(&self) -> Option<&str> {
+        match self {
+            DefaultResource::Data(data) => data.media_type(),
+            DefaultResource::File(file) => file.media_type(),
+        }
+    }
+
+    fn seekable(self) -> impl Read + Seek {
+        self
+    }
+}
+
+impl<'a> TryFrom<&'a Url> for DataResource<'a> {
+    type Error = Error;
+    fn try_from(value: &'a Url) -> Result<Self> {
+        let mut it = value.path().split(";base64,");
+        let (media_type, encoded) = match (it.next(), it.next()) {
+            (match0_opt, Some(match1)) => (match0_opt, match1),
+            (Some(match0), _) => (None, match0),
+            _ => return Err(Error::UnsupportedScheme),
+        };
+        Ok(DataResource {
+            media_type,
+            data: Cursor::new(base64::decode(encoded).map_err(Error::Base64)?),
+        })
+    }
+}
+
+impl<'a> TryFrom<&'a Url> for FileResource<'a> {
+    type Error = Error;
+    fn try_from(value: &'a Url) -> Result<Self> {
+        let path: &Path = value.path().as_ref();
+        let extension = path.extension().and_then(|s| s.to_str());
+
+        Ok(FileResource {
+            extension,
+            file: File::open(path).map_err(Error::Io)?,
+        })
+    }
+}
+
+pub struct DefaultImporter {
+    base: Url,
+}
+
+impl Default for DefaultImporter {
+    fn default() -> Self {
+        let base =
+            Url::from_directory_path(current_dir().expect("failed to get current directory"))
+                .expect("failed to make URL for current directory");
+        Self { base }
+    }
+}
+
+impl Importer for DefaultImporter {
+    fn open(&self, uri: &Url) -> Result<impl Resource> {
+        match uri.scheme() {
+            "data" => Ok(DefaultResource::Data(DataResource::try_from(uri)?)),
+            "file" => Ok(DefaultResource::File(FileResource::try_from(uri)?)),
+            _ => Err(Error::UnsupportedScheme),
+        }
+    }
+
+    fn base(&self) -> &Url {
+        &self.base
+    }
+}
+
+fn read_to_end(resource: &mut impl Resource) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    Read::read_to_end(resource, &mut buf)?;
+    Ok(buf)
+}
+
+fn path_to_uri(path: Option<&Path>) -> Result<Option<Url>> {
+    path.map(Url::from_file_path)
+        .transpose()
+        .map_err(|_| Error::UnsupportedScheme)
 }
 
 impl buffer::Data {
@@ -103,8 +298,26 @@ impl buffer::Data {
         base: Option<&Path>,
         blob: &mut Option<Vec<u8>>,
     ) -> Result<Self> {
+        Self::import_from_source_and_blob(
+            &DefaultImporter::default(),
+            source,
+            path_to_uri(base)?.as_ref(),
+            blob,
+        )
+    }
+
+    /// TODO
+    pub fn import_from_source_and_blob(
+        importer: &impl Importer,
+        source: buffer::Source<'_>,
+        base: Option<&Url>,
+        blob: &mut Option<Vec<u8>>,
+    ) -> Result<Self> {
         let mut data = match source {
-            buffer::Source::Uri(uri) => Scheme::read(base, uri),
+            buffer::Source::Uri(uri) => importer
+                .open(&importer.resolve(uri, base)?)?
+                .into_bytes()
+                .map_err(Error::Io),
             buffer::Source::Bin => blob.take().ok_or(Error::MissingBlob),
         }?;
         while data.len() % 4 != 0 {
@@ -123,21 +336,11 @@ impl buffer::Data {
 pub fn import_buffers(
     document: &Document,
     base: Option<&Path>,
-    mut blob: Option<Vec<u8>>,
+    blob: Option<Vec<u8>>,
 ) -> Result<Vec<buffer::Data>> {
-    let mut buffers = Vec::new();
-    for buffer in document.buffers() {
-        let data = buffer::Data::from_source_and_blob(buffer.source(), base, &mut blob)?;
-        if data.len() < buffer.length() {
-            return Err(Error::BufferLength {
-                buffer: buffer.index(),
-                expected: buffer.length(),
-                actual: data.len(),
-            });
-        }
-        buffers.push(data);
-    }
-    Ok(buffers)
+    let base = path_to_uri(base)?;
+    let importer = DefaultImporter::default();
+    importer.import_buffers(document, base.as_ref(), blob)
 }
 
 impl image::Data {
@@ -147,6 +350,21 @@ impl image::Data {
     pub fn from_source(
         source: image::Source<'_>,
         base: Option<&Path>,
+        buffer_data: &[buffer::Data],
+    ) -> Result<Self> {
+        Self::import_from_source(
+            &DefaultImporter::default(),
+            source,
+            path_to_uri(base)?.as_ref(),
+            buffer_data,
+        )
+    }
+
+    /// TODO
+    pub fn import_from_source(
+        importer: &impl Importer,
+        source: image::Source<'_>,
+        base: Option<&Url>,
         buffer_data: &[buffer::Data],
     ) -> Result<Self> {
         #[cfg(feature = "guess_mime_type")]
@@ -159,69 +377,41 @@ impl image::Data {
         };
         #[cfg(not(feature = "guess_mime_type"))]
         let guess_format = |_encoded_image: &[u8]| None;
-        let decoded_image = match source {
-            image::Source::Uri { uri, mime_type } if base.is_some() => match Scheme::parse(uri) {
-                Scheme::Data(Some(annoying_case), base64) => {
-                    let encoded_image = base64::decode(base64).map_err(Error::Base64)?;
-                    let encoded_format = match annoying_case {
-                        "image/png" => Png,
-                        "image/jpeg" => Jpeg,
-                        #[cfg(feature = "EXT_texture_webp")]
-                        "image/webp" => WebP,
-                        _ => match guess_format(&encoded_image) {
-                            Some(format) => format,
-                            None => return Err(Error::UnsupportedImageEncoding),
-                        },
-                    };
 
-                    image_crate::load_from_memory_with_format(&encoded_image, encoded_format)?
+        let choose_format =
+            |mime_type: Option<&str>, encoded_image: &[u8]| -> Result<ImageFormat> {
+                match mime_type {
+                    Some("image/png") => Ok(Png),
+                    Some("image/jpeg") => Ok(Jpeg),
+                    #[cfg(feature = "EXT_texture_webp")]
+                    Some("image/webp") => Ok(WebP),
+                    _ => guess_format(&encoded_image).ok_or(Error::UnsupportedImageEncoding)?,
                 }
-                Scheme::Unsupported => return Err(Error::UnsupportedScheme),
-                _ => {
-                    let encoded_image = Scheme::read(base, uri)?;
-                    let encoded_format = match mime_type {
-                        Some("image/png") => Png,
-                        Some("image/jpeg") => Jpeg,
-                        #[cfg(feature = "EXT_texture_webp")]
-                        Some("image/webp") => WebP,
-                        Some(_) => match guess_format(&encoded_image) {
-                            Some(format) => format,
-                            None => return Err(Error::UnsupportedImageEncoding),
-                        },
-                        None => match uri.rsplit('.').next() {
-                            Some("png") => Png,
-                            Some("jpg") | Some("jpeg") => Jpeg,
-                            #[cfg(feature = "EXT_texture_webp")]
-                            Some("webp") => WebP,
-                            _ => match guess_format(&encoded_image) {
-                                Some(format) => format,
-                                None => return Err(Error::UnsupportedImageEncoding),
-                            },
-                        },
-                    };
-                    image_crate::load_from_memory_with_format(&encoded_image, encoded_format)?
-                }
-            },
+            };
+
+        let (encoded_image, encoded_format) = match source {
+            image::Source::Uri { uri, mime_type } => {
+                let uri = importer.resolve(uri, base)?;
+                let mut resource = importer.open(&uri)?;
+                let encoded_image = read_to_end(&mut resource)?;
+                let mime_type = resource.media_type().or(mime_type);
+                let encoded_format = choose_format(mime_type, &encoded_image)?;
+
+                (Cow::from(encoded_image), encoded_format)
+            }
             image::Source::View { view, mime_type } => {
                 let parent_buffer_data = &buffer_data[view.buffer().index()].0;
                 let begin = view.offset();
                 let end = begin + view.length();
                 let encoded_image = &parent_buffer_data[begin..end];
-                let encoded_format = match mime_type {
-                    "image/png" => Png,
-                    "image/jpeg" => Jpeg,
-                    #[cfg(feature = "EXT_texture_webp")]
-                    "image/webp" => WebP,
-                    _ => match guess_format(encoded_image) {
-                        Some(format) => format,
-                        None => return Err(Error::UnsupportedImageEncoding),
-                    },
-                };
-                image_crate::load_from_memory_with_format(encoded_image, encoded_format)?
+                let encoded_format = choose_format(Some(mime_type), encoded_image)?;
+
+                (Cow::from(encoded_image), encoded_format)
             }
-            _ => return Err(Error::ExternalReferenceInSliceImport),
         };
 
+        let decoded_image =
+            image_crate::load_from_memory_with_format(&encoded_image, encoded_format)?;
         image::Data::new(decoded_image)
     }
 }
@@ -237,25 +427,17 @@ pub fn import_images(
     base: Option<&Path>,
     buffer_data: &[buffer::Data],
 ) -> Result<Vec<image::Data>> {
-    let mut images = Vec::new();
-    for image in document.images() {
-        images.push(image::Data::from_source(image.source(), base, buffer_data)?);
-    }
-    Ok(images)
-}
-
-fn import_impl(Gltf { document, blob }: Gltf, base: Option<&Path>) -> Result<Import> {
-    let buffer_data = import_buffers(&document, base, blob)?;
-    let image_data = import_images(&document, base, &buffer_data)?;
-    let import = (document, buffer_data, image_data);
-    Ok(import)
+    let base = path_to_uri(base)?;
+    let importer = DefaultImporter::default();
+    importer.import_images(document, base.as_ref(), buffer_data)
 }
 
 fn import_path(path: &Path) -> Result<Import> {
-    let base = path.parent().unwrap_or_else(|| Path::new("./"));
+    let importer = DefaultImporter::default();
     let file = fs::File::open(path).map_err(Error::Io)?;
     let reader = io::BufReader::new(file);
-    import_impl(Gltf::from_reader(reader)?, Some(base))
+    let gltf = Gltf::from_reader(reader)?;
+    importer.import_resources(gltf, path_to_uri(Some(path))?.as_ref())
 }
 
 /// Import glTF 2.0 from the file system.
@@ -293,7 +475,9 @@ where
 }
 
 fn import_slice_impl(slice: &[u8]) -> Result<Import> {
-    import_impl(Gltf::from_slice(slice)?, None)
+    let importer = DefaultImporter::default();
+    let gltf = Gltf::from_slice(slice)?;
+    importer.import_resources(gltf, None)
 }
 
 /// Import glTF 2.0 from a slice.
@@ -333,17 +517,4 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn relative_uri_with_invalid_percent_encoding_is_rejected() {
-        // `%FF%FE` decodes to bytes that are not valid UTF-8. The relative
-        // branch must not panic on the decode error; instead it falls back
-        // to `Scheme::Unsupported`, which `Scheme::read` reports as
-        // `Error::UnsupportedScheme`.
-        assert!(matches!(Scheme::parse("%FF%FE"), Scheme::Unsupported));
-        assert!(matches!(
-            Scheme::read(None, "%FF%FE"),
-            Err(Error::UnsupportedScheme)
-        ));
-    }
 }
