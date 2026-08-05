@@ -2,6 +2,7 @@ use crate::buffer;
 use crate::image;
 use std::borrow::Cow;
 use std::env::current_dir;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
 use std::io::BufReader;
@@ -93,7 +94,7 @@ pub trait ImporterExt: Importer {
 
     /// TODO
     fn import_path(&self, path: impl AsRef<Path>) -> Result<Import> {
-        let uri = path_to_uri(Some(path.as_ref()))?.unwrap();
+        let uri = path_to_uri(path.as_ref())?;
         self.import(&uri)
     }
 
@@ -290,12 +291,8 @@ impl<'a> TryFrom<&'a Url> for FileResource {
     type Error = Error;
     fn try_from(value: &'a Url) -> Result<Self> {
         let path = value.to_file_path().map_err(|_| Error::UnsupportedScheme)?;
-        let extension = path
-            .extension()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_owned());
 
-        let media_type = match extension.as_deref() {
+        let media_type = match path.extension().and_then(OsStr::to_str) {
             Some("jpg") | Some("jpeg") => Some("image/jpeg"),
             Some("png") => Some("image/png"),
             #[cfg(feature = "EXT_texture_webp")]
@@ -310,7 +307,7 @@ impl<'a> TryFrom<&'a Url> for FileResource {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug)]
 pub struct DefaultImporter;
 
 impl Importer for DefaultImporter {
@@ -327,20 +324,14 @@ impl Importer for DefaultImporter {
     }
 }
 
-fn path_to_uri(path: Option<&Path>) -> Result<Option<Url>> {
-    let Some(path) = path else {
-        return Ok(None);
-    };
-
+fn path_to_uri(path: &Path) -> Result<Url> {
     let path = if !path.is_absolute() {
         Cow::from(current_dir().map_err(Error::Io)?.join(path))
     } else {
         Cow::from(path)
     };
 
-    Ok(Some(
-        Url::from_file_path(path).map_err(|_| Error::UnsupportedScheme)?,
-    ))
+    Ok(Url::from_file_path(path).map_err(|_| Error::UnsupportedScheme)?)
 }
 
 impl buffer::Data {
@@ -361,12 +352,8 @@ impl buffer::Data {
         base: Option<&Path>,
         blob: &mut Option<Vec<u8>>,
     ) -> Result<Self> {
-        Self::import_from_source_and_blob(
-            &DefaultImporter::default(),
-            source,
-            path_to_uri(base)?.as_ref(),
-            blob,
-        )
+        let base = base.map(path_to_uri).transpose()?;
+        Self::import_from_source_and_blob(&DefaultImporter, source, base.as_ref(), blob)
     }
 
     /// TODO
@@ -401,9 +388,8 @@ pub fn import_buffers(
     base: Option<&Path>,
     blob: Option<Vec<u8>>,
 ) -> Result<Vec<buffer::Data>> {
-    let base = path_to_uri(base)?;
-    let importer = DefaultImporter::default();
-    importer.import_buffers(document, base.as_ref(), blob)
+    let base = base.map(path_to_uri).transpose()?;
+    DefaultImporter.import_buffers(document, base.as_ref(), blob)
 }
 
 impl image::Data {
@@ -415,12 +401,8 @@ impl image::Data {
         base: Option<&Path>,
         buffer_data: &[buffer::Data],
     ) -> Result<Self> {
-        Self::import_from_source(
-            &DefaultImporter::default(),
-            source,
-            path_to_uri(base)?.as_ref(),
-            buffer_data,
-        )
+        let base = base.map(path_to_uri).transpose()?;
+        Self::import_from_source(&DefaultImporter, source, base.as_ref(), buffer_data)
     }
 
     /// TODO
@@ -490,9 +472,8 @@ pub fn import_images(
     base: Option<&Path>,
     buffer_data: &[buffer::Data],
 ) -> Result<Vec<image::Data>> {
-    let base = path_to_uri(base)?;
-    let importer = DefaultImporter::default();
-    importer.import_images(document, base.as_ref(), buffer_data)
+    let base = base.map(path_to_uri).transpose()?;
+    DefaultImporter.import_images(document, base.as_ref(), buffer_data)
 }
 
 /// Import glTF 2.0 from the file system.
@@ -526,8 +507,7 @@ pub fn import<P>(path: P) -> Result<Import>
 where
     P: AsRef<Path>,
 {
-    let importer = DefaultImporter::default();
-    importer.import_path(path)
+    DefaultImporter.import_path(path)
 }
 
 /// Import glTF 2.0 from a slice.
@@ -561,8 +541,7 @@ pub fn import_slice<S>(slice: S) -> Result<Import>
 where
     S: AsRef<[u8]>,
 {
-    let importer = DefaultImporter::default();
-    importer.import_slice(slice)
+    DefaultImporter.import_slice(slice)
 }
 
 #[cfg(test)]
