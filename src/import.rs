@@ -3,6 +3,7 @@ use crate::image;
 use std::borrow::Cow;
 use std::fs;
 use std::fs::File;
+use std::io::BufReader;
 use std::io::Cursor;
 use std::io::Read;
 use std::io::Seek;
@@ -31,10 +32,12 @@ pub struct Importer<S> {
 }
 
 pub trait OpenScheme<S> {
-    fn open_seekable(&self, scheme: &S) -> Result<impl Read + Seek>;
+    fn open(&self, scheme: &S) -> Result<impl Read>;
 
-    fn open(&self, scheme: &S) -> Result<impl Read> {
-        self.open_seekable(scheme)
+    fn open_seekable(&self, scheme: &S) -> Result<impl Read + Seek> {
+        let mut bytes = Vec::new();
+        self.open(scheme)?.read_to_end(&mut bytes)?;
+        Ok(Cursor::new(bytes))
     }
 }
 
@@ -95,6 +98,10 @@ impl<R: Seek> Seek for BytesOrReader<R> {
 }
 
 impl<'a> OpenScheme<DefaultScheme<'a>> for DefaultSchemeHandler<'_> {
+    fn open(&self, scheme: &DefaultScheme<'a>) -> Result<impl Read> {
+        self.open_seekable(scheme)
+    }
+
     fn open_seekable(&self, scheme: &DefaultScheme<'a>) -> Result<impl Read + Seek> {
         match scheme {
             // The path may be unused in the Scheme::Data case
@@ -241,7 +248,8 @@ where
 
     pub fn import(&self, uri: &str) -> Result<Import> {
         let scheme = S::parse(uri);
-        let gltf = Gltf::from_reader(self.scheme_handler.open_seekable(&scheme)?)?;
+        let reader = BufReader::new(self.scheme_handler.open_seekable(&scheme)?);
+        let gltf = Gltf::from_reader(reader)?;
         self.import_impl(gltf)
     }
 
