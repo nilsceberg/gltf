@@ -171,6 +171,10 @@ pub use self::import::import_images;
 #[cfg(feature = "import")]
 #[doc(inline)]
 pub use self::import::import_slice;
+#[cfg(feature = "import")]
+pub use self::import::{
+    DefaultReferenceResolver, DefaultScheme, Importer, ResourceReference, ResourceResolver,
+};
 #[doc(inline)]
 pub use self::material::Material;
 #[doc(inline)]
