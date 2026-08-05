@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::Cursor;
 use std::io::Read;
 use std::io::Seek;
+use std::path::PathBuf;
 
 use crate::{Document, Error, Gltf, Result};
 use image_crate::ImageFormat;
@@ -40,7 +41,7 @@ pub trait ParseScheme {
 
 pub trait Scheme {
     fn media_type(&self) -> Option<&str>;
-    fn file_ending(&self) -> Option<&str>;
+    fn extension(&self) -> Option<&str>;
 }
 
 pub struct DefaultSchemeHandler<'a> {
@@ -60,18 +61,18 @@ impl Default for DefaultSchemeHandler<'_> {
     }
 }
 
-enum BytesOrReader<'a, R> {
-    Bytes(Cursor<Cow<'a, [u8]>>),
+enum BytesOrReader<R> {
+    Bytes(Cursor<Vec<u8>>),
     Reader(R),
 }
 
-impl<R> From<Vec<u8>> for BytesOrReader<'_, R> {
+impl<R> From<Vec<u8>> for BytesOrReader<R> {
     fn from(bytes: Vec<u8>) -> Self {
-        BytesOrReader::Bytes(Cursor::new(Cow::Owned(bytes)))
+        BytesOrReader::Bytes(Cursor::new(bytes))
     }
 }
 
-impl<'a, R: Read> Read for BytesOrReader<'a, R> {
+impl<R: Read> Read for BytesOrReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             BytesOrReader::Bytes(bytes) => bytes.read(buf),
@@ -80,13 +81,10 @@ impl<'a, R: Read> Read for BytesOrReader<'a, R> {
     }
 }
 
-impl<'a, R: Seek> Seek for BytesOrReader<'a, R> {
+impl<R: Seek> Seek for BytesOrReader<R> {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         match self {
-            BytesOrReader::Bytes(_) => Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "seek is not supported for BytesOrReader::Bytes",
-            )),
+            BytesOrReader::Bytes(reader) => reader.seek(pos),
             BytesOrReader::Reader(reader) => reader.seek(pos),
         }
     }
@@ -129,10 +127,10 @@ pub enum DefaultScheme<'a> {
     /// `file:[//]<absolute file path>`.
     ///
     /// Note: The file scheme does not implement authority.
-    File(&'a str),
+    File(&'a Path),
 
     /// `../foo`, etc.
-    Relative(Cow<'a, str>),
+    Relative(Cow<'a, Path>),
 
     /// Placeholder for an unsupported URI scheme identifier.
     Unsupported,
@@ -146,12 +144,13 @@ impl Scheme for DefaultScheme<'_> {
         }
     }
 
-    fn file_ending(&self) -> Option<&str> {
+    fn extension(&self) -> Option<&str> {
         match self {
-            DefaultScheme::File(path) => path.rsplit(".").next(),
-            DefaultScheme::Relative(path) => path.rsplit(".").next(),
+            DefaultScheme::File(path) => path.extension(),
+            DefaultScheme::Relative(path) => path.extension(),
             _ => None,
         }
+        .and_then(|x| x.to_str())
     }
 }
 
@@ -167,15 +166,18 @@ impl<'a> DefaultScheme<'a> {
                     _ => DefaultScheme::Unsupported,
                 }
             } else if let Some(rest) = uri.strip_prefix("file://") {
-                DefaultScheme::File(rest)
+                DefaultScheme::File(rest.as_ref())
             } else if let Some(rest) = uri.strip_prefix("file:") {
-                DefaultScheme::File(rest)
+                DefaultScheme::File(rest.as_ref())
             } else {
                 DefaultScheme::Unsupported
             }
         } else {
             match urlencoding::decode(uri) {
-                Ok(decoded) => DefaultScheme::Relative(decoded),
+                Ok(decoded) => DefaultScheme::Relative(match decoded {
+                    Cow::Borrowed(decoded) => Cow::Borrowed(decoded.as_ref()),
+                    Cow::Owned(decoded) => Cow::Owned(PathBuf::from(decoded)),
+                }),
                 Err(_) => DefaultScheme::Unsupported,
             }
         }
@@ -375,11 +377,12 @@ impl image::Data {
                 let encoded_image = importer.read_to_end(&scheme)?;
 
                 // This is a bit of a hack to match the old behavior.
-                let mime_type = scheme.media_type().or(mime_type).or(scheme
-                    .file_ending()
-                    .and_then(|e| match e {
+                let mime_type = scheme
+                    .media_type()
+                    .or(mime_type)
+                    .or(scheme.extension().and_then(|e| match e {
                         "png" => Some("image/png"),
-                        "jpg" => Some("image/jpeg"),
+                        "jpg" | "jpeg" => Some("image/jpeg"),
                         #[cfg(feature = "EXT_texture_webp")]
                         "webp" => Some("image/webp"),
                         _ => return None,
