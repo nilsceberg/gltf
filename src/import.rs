@@ -92,6 +92,18 @@ pub trait ImporterExt: Importer {
     }
 
     /// TODO
+    fn import_path(&self, path: impl AsRef<Path>) -> Result<Import> {
+        let uri = path_to_uri(Some(path.as_ref()))?.unwrap();
+        self.import(&uri)
+    }
+
+    /// TODO
+    fn import_slice(&self, slice: impl AsRef<[u8]>) -> Result<Import> {
+        let gltf = Gltf::from_slice(slice.as_ref())?;
+        self.import_resources(gltf, None)
+    }
+
+    /// TODO
     fn import_buffers(
         &self,
         document: &Document,
@@ -181,7 +193,7 @@ impl Seek for DataResource<'_> {
 
 /// TODO: doc
 pub struct FileResource {
-    extension: Option<String>,
+    media_type: Option<&'static str>,
     file: File,
 }
 
@@ -217,13 +229,7 @@ impl Resource for DataResource<'_> {
 
 impl Resource for FileResource {
     fn media_type(&self) -> Option<&str> {
-        match self.extension.as_deref() {
-            Some("jpg") | Some("jpeg") => Some("image/jpeg"),
-            Some("png") => Some("image/png"),
-            #[cfg(feature = "EXT_texture_webp")]
-            Some("webp") => Some("image/webp"),
-            _ => None,
-        }
+        self.media_type
     }
 }
 
@@ -289,8 +295,16 @@ impl<'a> TryFrom<&'a Url> for FileResource {
             .and_then(|s| s.to_str())
             .map(|s| s.to_owned());
 
+        let media_type = match extension.as_deref() {
+            Some("jpg") | Some("jpeg") => Some("image/jpeg"),
+            Some("png") => Some("image/png"),
+            #[cfg(feature = "EXT_texture_webp")]
+            Some("webp") => Some("image/webp"),
+            _ => None,
+        };
+
         Ok(FileResource {
-            extension,
+            media_type,
             file: File::open(path).map_err(Error::Io)?,
         })
     }
@@ -319,11 +333,7 @@ fn path_to_uri(path: Option<&Path>) -> Result<Option<Url>> {
     };
 
     let path = if !path.is_absolute() {
-        Cow::from(
-            current_dir()
-                .expect("failed to get current directory")
-                .join(path),
-        )
+        Cow::from(current_dir().map_err(Error::Io)?.join(path))
     } else {
         Cow::from(path)
     };
@@ -485,12 +495,6 @@ pub fn import_images(
     importer.import_images(document, base.as_ref(), buffer_data)
 }
 
-fn import_path(path: &Path) -> Result<Import> {
-    let uri = path_to_uri(Some(path))?.unwrap();
-    let importer = DefaultImporter::default();
-    importer.import(&uri)
-}
-
 /// Import glTF 2.0 from the file system.
 ///
 /// ```
@@ -522,13 +526,8 @@ pub fn import<P>(path: P) -> Result<Import>
 where
     P: AsRef<Path>,
 {
-    import_path(path.as_ref())
-}
-
-fn import_slice_impl(slice: &[u8]) -> Result<Import> {
     let importer = DefaultImporter::default();
-    let gltf = Gltf::from_slice(slice)?;
-    importer.import_resources(gltf, None)
+    importer.import_path(path)
 }
 
 /// Import glTF 2.0 from a slice.
@@ -562,7 +561,8 @@ pub fn import_slice<S>(slice: S) -> Result<Import>
 where
     S: AsRef<[u8]>,
 {
-    import_slice_impl(slice.as_ref())
+    let importer = DefaultImporter::default();
+    importer.import_slice(slice)
 }
 
 #[cfg(test)]
