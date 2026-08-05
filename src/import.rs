@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::env::current_dir;
 use std::fs::File;
 use std::io;
+use std::io::BufReader;
 use std::io::Cursor;
 use std::io::Read;
 use std::io::Seek;
@@ -85,8 +86,8 @@ pub trait ImporterExt: Importer {
 
     /// TODO
     fn import(&self, uri: &Url) -> Result<Import> {
-        let resource = self.open_seekable(uri)?;
-        let document = Gltf::from_reader(resource)?;
+        let reader = BufReader::new(self.open_seekable(uri)?);
+        let document = Gltf::from_reader(reader)?;
         self.import_resources(document, Some(&uri))
     }
 
@@ -300,6 +301,10 @@ pub struct DefaultImporter;
 
 impl Importer for DefaultImporter {
     fn open(&self, uri: &Url) -> Result<impl Resource> {
+        self.open_seekable(uri)
+    }
+
+    fn open_seekable(&self, uri: &Url) -> Result<impl Resource + Seek> {
         match uri.scheme() {
             "data" => Ok(DefaultResource::Data(DataResource::try_from(uri)?)),
             "file" => Ok(DefaultResource::File(FileResource::try_from(uri)?)),
