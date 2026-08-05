@@ -9,6 +9,7 @@ use std::io::BufReader;
 use std::io::Cursor;
 use std::io::Read;
 use std::io::Seek;
+use std::path::PathBuf;
 
 use crate::{Document, Error, Gltf, Result};
 use image_crate::ImageFormat;
@@ -198,7 +199,8 @@ pub struct FileResource {
     file: File,
 }
 
-enum DefaultResource<'a> {
+/// TODO
+pub enum DefaultResource<'a> {
     Data(DataResource<'a>),
     File(FileResource),
 }
@@ -212,6 +214,23 @@ impl Read for FileResource {
 impl Seek for FileResource {
     fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
         self.file.seek(pos)
+    }
+}
+
+impl FileResource {
+    /// TODO
+    pub fn path_and_media_type(uri: &Url) -> Result<(PathBuf, Option<&'static str>)> {
+        let path = uri.to_file_path().map_err(|_| Error::UnsupportedScheme)?;
+
+        let media_type = match path.extension().and_then(OsStr::to_str) {
+            Some("jpg") | Some("jpeg") => Some("image/jpeg"),
+            Some("png") => Some("image/png"),
+            #[cfg(feature = "EXT_texture_webp")]
+            Some("webp") => Some("image/webp"),
+            _ => None,
+        };
+
+        Ok((path, media_type))
     }
 }
 
@@ -290,15 +309,7 @@ impl<'a> TryFrom<&'a Url> for DataResource<'a> {
 impl<'a> TryFrom<&'a Url> for FileResource {
     type Error = Error;
     fn try_from(value: &'a Url) -> Result<Self> {
-        let path = value.to_file_path().map_err(|_| Error::UnsupportedScheme)?;
-
-        let media_type = match path.extension().and_then(OsStr::to_str) {
-            Some("jpg") | Some("jpeg") => Some("image/jpeg"),
-            Some("png") => Some("image/png"),
-            #[cfg(feature = "EXT_texture_webp")]
-            Some("webp") => Some("image/webp"),
-            _ => None,
-        };
+        let (path, media_type) = FileResource::path_and_media_type(value)?;
 
         Ok(FileResource {
             media_type,
@@ -307,7 +318,7 @@ impl<'a> TryFrom<&'a Url> for FileResource {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultImporter;
 
 impl Importer for DefaultImporter {
@@ -331,7 +342,7 @@ fn path_to_uri(path: &Path) -> Result<Url> {
         Cow::from(path)
     };
 
-    Ok(Url::from_file_path(path).map_err(|_| Error::UnsupportedScheme)?)
+    Url::from_file_path(path).map_err(|_| Error::UnsupportedScheme)
 }
 
 impl buffer::Data {
