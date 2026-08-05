@@ -31,7 +31,11 @@ pub struct Importer<S> {
 }
 
 pub trait OpenScheme<S> {
-    fn open(&self, scheme: &S) -> Result<impl Read + Seek>;
+    fn open_seekable(&self, scheme: &S) -> Result<impl Read + Seek>;
+
+    fn open(&self, scheme: &S) -> Result<impl Read> {
+        self.open_seekable(scheme)
+    }
 }
 
 pub trait ParseScheme {
@@ -91,7 +95,7 @@ impl<R: Seek> Seek for BytesOrReader<R> {
 }
 
 impl<'a> OpenScheme<DefaultScheme<'a>> for DefaultSchemeHandler<'_> {
-    fn open(&self, scheme: &DefaultScheme<'a>) -> Result<impl Read + Seek> {
+    fn open_seekable(&self, scheme: &DefaultScheme<'a>) -> Result<impl Read + Seek> {
         match scheme {
             // The path may be unused in the Scheme::Data case
             // Example: "uri" : "data:application/octet-stream;base64,wsVHPgA...."
@@ -101,7 +105,6 @@ impl<'a> OpenScheme<DefaultScheme<'a>> for DefaultSchemeHandler<'_> {
             DefaultScheme::File(path) if self.base.is_some() => {
                 Ok(BytesOrReader::Reader(File::open(path)?))
             }
-
             DefaultScheme::Relative(path) if self.base.is_some() => Ok(BytesOrReader::Reader(
                 File::open(self.base.unwrap().join(&**path))?,
             )),
@@ -238,7 +241,7 @@ where
 
     pub fn import(&self, uri: &str) -> Result<Import> {
         let scheme = S::parse(uri);
-        let gltf = Gltf::from_reader(self.scheme_handler.open(&scheme)?)?;
+        let gltf = Gltf::from_reader(self.scheme_handler.open_seekable(&scheme)?)?;
         self.import_impl(gltf)
     }
 
