@@ -3,10 +3,10 @@ use crate::image;
 use std::borrow::Cow;
 use std::env::current_dir;
 use std::fs::File;
+use std::io;
 use std::io::Cursor;
 use std::io::Read;
 use std::io::Seek;
-use std::{fs, io};
 
 use crate::{Document, Error, Gltf, Result};
 use image_crate::ImageFormat;
@@ -23,23 +23,70 @@ type Import = (Document, Vec<buffer::Data>, Vec<image::Data>);
 pub trait Importer: Sized {
     /// TODO
     fn open(&self, uri: &Url) -> Result<impl Resource>;
+
     /// TODO
-    fn base(&self) -> &Url;
+    fn open_seekable(&self, uri: &Url) -> Result<impl Resource + Seek> {
+        Ok(SeekableWrapper::new(self.open(uri)?)?)
+    }
+}
+
+struct SeekableWrapper(Option<String>, io::Cursor<Vec<u8>>);
+
+impl Resource for SeekableWrapper {
+    fn media_type(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
+
+    fn into_bytes(self) -> io::Result<Vec<u8>>
+    where
+        Self: Sized,
+    {
+        Ok(self.1.into_inner())
+    }
+}
+
+impl SeekableWrapper {
+    fn new<R: Resource>(resource: R) -> Result<Self> {
+        Ok(Self(
+            resource.media_type().map(String::from),
+            io::Cursor::new(resource.into_bytes()?),
+        ))
+    }
+}
+
+impl Read for SeekableWrapper {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.1.read(buf)
+    }
+}
+
+impl Seek for SeekableWrapper {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        self.1.seek(pos)
+    }
 }
 
 /// TODO
 pub trait ImporterExt: Importer {
     /// TODO
     fn resolve(&self, uri: &str, base: Option<&Url>) -> Result<Url> {
-        // TODO: the error here should probably be related to the slice thingy
-        base.unwrap_or(self.base()).join(uri).map_err(Error::Uri)
+        match Url::parse(uri) {
+            Ok(absolute) => {
+                // TODO: allow absolute paths?
+                Ok(absolute)
+            }
+            Err(url::ParseError::RelativeUrlWithoutBase) => {
+                let base = base.ok_or(Error::ExternalReferenceInSliceImport)?;
+                base.join(uri).map_err(Error::Uri)
+            }
+            Err(error) => Err(Error::Uri(error)),
+        }
     }
 
     /// TODO
-    fn import(&self, uri: &str) -> Result<Import> {
-        let uri = self.resolve(uri, None)?;
-        let resource = self.open(&uri)?;
-        let document = Gltf::from_reader(resource.seekable())?;
+    fn import(&self, uri: &Url) -> Result<Import> {
+        let resource = self.open_seekable(uri)?;
+        let document = Gltf::from_reader(resource)?;
         self.import_resources(document, Some(&uri))
     }
 
@@ -102,7 +149,6 @@ impl<T: Importer> ImporterExt for T {}
 
 pub trait Resource: Read {
     fn media_type(&self) -> Option<&str>;
-    fn seekable(self) -> impl Read + Seek;
 
     fn into_bytes(mut self) -> io::Result<Vec<u8>>
     where
@@ -133,23 +179,23 @@ impl Seek for DataResource<'_> {
 }
 
 /// TODO: doc
-pub struct FileResource<'a> {
-    extension: Option<&'a str>,
+pub struct FileResource {
+    extension: Option<String>,
     file: File,
 }
 
 enum DefaultResource<'a> {
     Data(DataResource<'a>),
-    File(FileResource<'a>),
+    File(FileResource),
 }
 
-impl Read for FileResource<'_> {
+impl Read for FileResource {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.file.read(buf)
     }
 }
 
-impl Seek for FileResource<'_> {
+impl Seek for FileResource {
     fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
         self.file.seek(pos)
     }
@@ -160,24 +206,23 @@ impl Resource for DataResource<'_> {
         self.media_type
     }
 
-    fn seekable(self) -> impl Read + Seek {
-        self
+    fn into_bytes(self) -> io::Result<Vec<u8>>
+    where
+        Self: Sized,
+    {
+        Ok(self.data.into_inner())
     }
 }
 
-impl Resource for FileResource<'_> {
+impl Resource for FileResource {
     fn media_type(&self) -> Option<&str> {
-        match self.extension {
+        match self.extension.as_deref() {
             Some("jpg") | Some("jpeg") => Some("image/jpeg"),
             Some("png") => Some("image/png"),
             #[cfg(feature = "EXT_texture_webp")]
             Some("webp") => Some("image/webp"),
             _ => None,
         }
-    }
-
-    fn seekable(self) -> impl Read + Seek {
-        self
     }
 }
 
@@ -207,8 +252,14 @@ impl Resource for DefaultResource<'_> {
         }
     }
 
-    fn seekable(self) -> impl Read + Seek {
-        self
+    fn into_bytes(self) -> io::Result<Vec<u8>>
+    where
+        Self: Sized,
+    {
+        match self {
+            DefaultResource::Data(data) => data.into_bytes(),
+            DefaultResource::File(file) => file.into_bytes(),
+        }
     }
 }
 
@@ -228,11 +279,14 @@ impl<'a> TryFrom<&'a Url> for DataResource<'a> {
     }
 }
 
-impl<'a> TryFrom<&'a Url> for FileResource<'a> {
+impl<'a> TryFrom<&'a Url> for FileResource {
     type Error = Error;
     fn try_from(value: &'a Url) -> Result<Self> {
-        let path: &Path = value.path().as_ref();
-        let extension = path.extension().and_then(|s| s.to_str());
+        let path = value.to_file_path().map_err(|_| Error::UnsupportedScheme)?;
+        let extension = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_owned());
 
         Ok(FileResource {
             extension,
@@ -241,18 +295,8 @@ impl<'a> TryFrom<&'a Url> for FileResource<'a> {
     }
 }
 
-pub struct DefaultImporter {
-    base: Url,
-}
-
-impl Default for DefaultImporter {
-    fn default() -> Self {
-        let base =
-            Url::from_directory_path(current_dir().expect("failed to get current directory"))
-                .expect("failed to make URL for current directory");
-        Self { base }
-    }
-}
+#[derive(Debug, Default, Clone)]
+pub struct DefaultImporter;
 
 impl Importer for DefaultImporter {
     fn open(&self, uri: &Url) -> Result<impl Resource> {
@@ -262,22 +306,26 @@ impl Importer for DefaultImporter {
             _ => Err(Error::UnsupportedScheme),
         }
     }
-
-    fn base(&self) -> &Url {
-        &self.base
-    }
-}
-
-fn read_to_end(resource: &mut impl Resource) -> Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    Read::read_to_end(resource, &mut buf)?;
-    Ok(buf)
 }
 
 fn path_to_uri(path: Option<&Path>) -> Result<Option<Url>> {
-    path.map(Url::from_file_path)
-        .transpose()
-        .map_err(|_| Error::UnsupportedScheme)
+    let Some(path) = path else {
+        return Ok(None);
+    };
+
+    let path = if !path.is_absolute() {
+        Cow::from(
+            current_dir()
+                .expect("failed to get current directory")
+                .join(path),
+        )
+    } else {
+        Cow::from(path)
+    };
+
+    Ok(Some(
+        Url::from_file_path(path).map_err(|_| Error::UnsupportedScheme)?,
+    ))
 }
 
 impl buffer::Data {
@@ -392,10 +440,10 @@ impl image::Data {
         let (encoded_image, encoded_format) = match source {
             image::Source::Uri { uri, mime_type } => {
                 let uri = importer.resolve(uri, base)?;
-                let mut resource = importer.open(&uri)?;
-                let encoded_image = read_to_end(&mut resource)?;
-                let mime_type = resource.media_type().or(mime_type);
-                let encoded_format = choose_format(mime_type, &encoded_image)?;
+                let resource = importer.open(&uri)?;
+                let mime_type = resource.media_type().or(mime_type).map(String::from);
+                let encoded_image = resource.into_bytes()?;
+                let encoded_format = choose_format(mime_type.as_deref(), &encoded_image)?;
 
                 (Cow::from(encoded_image), encoded_format)
             }
@@ -433,11 +481,9 @@ pub fn import_images(
 }
 
 fn import_path(path: &Path) -> Result<Import> {
+    let uri = path_to_uri(Some(path))?.unwrap();
     let importer = DefaultImporter::default();
-    let file = fs::File::open(path).map_err(Error::Io)?;
-    let reader = io::BufReader::new(file);
-    let gltf = Gltf::from_reader(reader)?;
-    importer.import_resources(gltf, path_to_uri(Some(path))?.as_ref())
+    importer.import(&uri)
 }
 
 /// Import glTF 2.0 from the file system.
