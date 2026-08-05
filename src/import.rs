@@ -27,42 +27,56 @@ use std::path::Path;
 /// Return type of `import`.
 type Import = (Document, Vec<buffer::Data>, Vec<image::Data>);
 
+/// TODO
 pub struct Importer<S> {
     scheme_handler: S,
 }
 
-pub trait OpenScheme<S> {
-    fn open(&self, scheme: &S) -> Result<impl Read>;
+/// TODO
+pub trait ResourceResolver<'a> {
+    /// TODO
+    type Reference<'b>: ResourceReference;
 
-    fn open_seekable(&self, scheme: &S) -> Result<impl Read + Seek> {
+    /// TODO
+    fn parse<'b>(uri: &'b str) -> Self::Reference<'b>;
+
+    /// TODO
+    fn with_base_from(resource: &'a Self::Reference<'a>) -> Self;
+
+    /// TODO
+    fn open<'b>(&'b self, reference: &Self::Reference<'b>) -> Result<impl Read>;
+
+    /// TODO
+    fn open_seekable<'b>(&'b self, reference: &Self::Reference<'b>) -> Result<impl Read + Seek> {
         let mut bytes = Vec::new();
-        self.open(scheme)?.read_to_end(&mut bytes)?;
+        self.open(reference)?.read_to_end(&mut bytes)?;
         Ok(Cursor::new(bytes))
     }
 }
 
-pub trait ParseScheme {
-    type Scheme<'a>: Scheme;
-    fn parse<'a>(uri: &'a str) -> Self::Scheme<'a>;
-}
-
-pub trait Scheme {
+/// TODO
+pub trait ResourceReference {
+    /// TODO
     fn media_type(&self) -> Option<&str>;
+    /// TODO
     fn extension(&self) -> Option<&str>;
 }
 
-pub struct DefaultSchemeHandler<'a> {
+/// TODO
+pub struct DefaultReferenceResolver<'a> {
     base: Option<&'a Path>,
 }
 
-impl<'a> DefaultSchemeHandler<'a> {
+/// TODO
+impl<'a> DefaultReferenceResolver<'a> {
+    /// TODO
     pub fn with_base(mut self, base: &'a Path) -> Self {
         self.base = Some(base);
         self
     }
 }
 
-impl Default for DefaultSchemeHandler<'_> {
+impl Default for DefaultReferenceResolver<'_> {
     fn default() -> Self {
         Self { base: None }
     }
@@ -97,12 +111,24 @@ impl<R: Seek> Seek for BytesOrReader<R> {
     }
 }
 
-impl<'a> OpenScheme<DefaultScheme<'a>> for DefaultSchemeHandler<'_> {
-    fn open(&self, scheme: &DefaultScheme<'a>) -> Result<impl Read> {
+impl<'a> ResourceResolver<'a> for DefaultReferenceResolver<'a> {
+    type Reference<'b> = DefaultScheme<'b>;
+
+    fn parse<'b>(uri: &'b str) -> DefaultScheme<'b> {
+        DefaultScheme::parse(uri)
+    }
+
+    fn with_base_from(reference: &'a DefaultScheme<'a>) -> Self {
+        Self {
+            base: reference.base(),
+        }
+    }
+
+    fn open<'b>(&'b self, scheme: &DefaultScheme<'b>) -> Result<impl Read> {
         self.open_seekable(scheme)
     }
 
-    fn open_seekable(&self, scheme: &DefaultScheme<'a>) -> Result<impl Read + Seek> {
+    fn open_seekable(&self, scheme: &DefaultScheme<'_>) -> Result<impl Read + Seek> {
         match scheme {
             // The path may be unused in the Scheme::Data case
             // Example: "uri" : "data:application/octet-stream;base64,wsVHPgA...."
@@ -118,13 +144,6 @@ impl<'a> OpenScheme<DefaultScheme<'a>> for DefaultSchemeHandler<'_> {
             DefaultScheme::Unsupported => Err(Error::UnsupportedScheme),
             _ => Err(Error::ExternalReferenceInSliceImport),
         }
-    }
-}
-
-impl ParseScheme for DefaultSchemeHandler<'_> {
-    type Scheme<'a> = DefaultScheme<'a>;
-    fn parse<'a>(uri: &'a str) -> DefaultScheme<'a> {
-        DefaultScheme::parse(uri)
     }
 }
 
@@ -146,7 +165,7 @@ pub enum DefaultScheme<'a> {
     Unsupported,
 }
 
-impl Scheme for DefaultScheme<'_> {
+impl ResourceReference for DefaultScheme<'_> {
     fn media_type(&self) -> Option<&str> {
         match self {
             DefaultScheme::Data(media_type, _) => *media_type,
@@ -165,7 +184,8 @@ impl Scheme for DefaultScheme<'_> {
 }
 
 impl<'a> DefaultScheme<'a> {
-    fn parse(uri: &str) -> DefaultScheme<'_> {
+    /// TODO
+    pub fn parse(uri: &str) -> DefaultScheme<'_> {
         if uri.contains(':') {
             if let Some(rest) = uri.strip_prefix("data:") {
                 let mut it = rest.split(";base64,");
@@ -192,24 +212,47 @@ impl<'a> DefaultScheme<'a> {
             }
         }
     }
-}
 
-impl<'a> Importer<DefaultSchemeHandler<'a>> {
-    pub fn for_base(base: Option<&'a Path>) -> Self {
-        Self::new(DefaultSchemeHandler { base })
+    /// TODO
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            DefaultScheme::File(path) => Some(path),
+            DefaultScheme::Relative(path) => Some(path.as_ref()),
+            _ => None,
+        }
+    }
+
+    /// TODO
+    pub fn base(&self) -> Option<&Path> {
+        self.path()
+            .map(|path| path.parent().unwrap_or("./".as_ref()))
     }
 }
 
 impl<S> Importer<S> {
+    /// TODO
     pub fn new(scheme_handler: S) -> Self {
         Self { scheme_handler }
     }
 }
 
-impl<S> Importer<S>
+impl<'a> Importer<DefaultReferenceResolver<'a>> {
+    /// TODO
+    pub fn with_base(base: Option<&'a Path>) -> Self {
+        Self::new(DefaultReferenceResolver { base })
+    }
+}
+
+impl<'a, S> Importer<S>
 where
-    for<'a> S: ParseScheme + OpenScheme<S::Scheme<'a>>,
+    S: ResourceResolver<'a>,
 {
+    /// TODO
+    pub fn with_base_from(reference: &'a S::Reference<'a>) -> Self {
+        Self::new(S::with_base_from(reference))
+    }
+
+    /// TODO
     pub fn import_buffers(
         &self,
         document: &Document,
@@ -230,6 +273,7 @@ where
         Ok(buffers)
     }
 
+    /// TODO
     pub fn import_images(
         &self,
         document: &Document,
@@ -246,18 +290,25 @@ where
         Ok(images)
     }
 
-    pub fn import(&self, uri: &str) -> Result<Import> {
-        let scheme = S::parse(uri);
-        let reader = BufReader::new(self.scheme_handler.open_seekable(&scheme)?);
+    /// TODO
+    pub fn import(&'a self, uri: &'a str) -> Result<Import> {
+        self.import_reference(&S::parse(uri))
+    }
+
+    /// TODO
+    pub fn import_reference(&'a self, reference: &S::Reference<'a>) -> Result<Import> {
+        let reader = BufReader::new(self.scheme_handler.open_seekable(&reference)?);
         let gltf = Gltf::from_reader(reader)?;
         self.import_impl(gltf)
     }
 
+    /// TODO
     pub fn import_slice(&self, slice: impl AsRef<[u8]>) -> Result<Import> {
         let gltf = Gltf::from_slice(slice.as_ref())?;
         self.import_impl(gltf)
     }
 
+    /// TODO
     pub fn import_path(&self, path: impl AsRef<Path>) -> Result<Import> {
         let gltf = Gltf::from_reader(fs::File::open(path)?)?;
         self.import_impl(gltf)
@@ -270,7 +321,8 @@ where
         Ok(import)
     }
 
-    fn read_to_end(&self, scheme: &S::Scheme<'_>) -> Result<Vec<u8>> {
+    fn read_to_end<'b>(&'b self, scheme: &S::Reference<'b>) -> Result<Vec<u8>> {
+        // TODO: lifetime is all fucky
         let mut data = Vec::new();
         self.scheme_handler
             .open(scheme)?
@@ -300,18 +352,18 @@ impl buffer::Data {
         base: Option<&Path>,
         blob: &mut Option<Vec<u8>>,
     ) -> Result<Self> {
-        let importer = Importer::for_base(base);
+        let importer = Importer::with_base(base);
         Self::import_from_source_and_blob(&importer, source, blob)
     }
 
     /// TODO
-    pub fn import_from_source_and_blob<S>(
+    pub fn import_from_source_and_blob<'a, S>(
         importer: &Importer<S>,
         source: buffer::Source<'_>,
         blob: &mut Option<Vec<u8>>,
     ) -> Result<Self>
     where
-        for<'a> S: ParseScheme + OpenScheme<S::Scheme<'a>>,
+        S: ResourceResolver<'a>,
     {
         let mut data = match source {
             buffer::Source::Uri(uri) => importer.read_to_end(&S::parse(uri)),
@@ -335,7 +387,7 @@ pub fn import_buffers(
     base: Option<&Path>,
     blob: Option<Vec<u8>>,
 ) -> Result<Vec<buffer::Data>> {
-    Importer::for_base(base).import_buffers(document, blob)
+    Importer::with_base(base).import_buffers(document, blob)
 }
 
 impl image::Data {
@@ -347,18 +399,18 @@ impl image::Data {
         base: Option<&Path>,
         buffer_data: &[buffer::Data],
     ) -> Result<Self> {
-        let importer = Importer::for_base(base);
+        let importer = Importer::with_base(base);
         Self::import_from_source(&importer, source, buffer_data)
     }
 
     /// TODO
-    pub fn import_from_source<S>(
+    pub fn import_from_source<'a, S>(
         importer: &Importer<S>,
         source: image::Source<'_>,
         buffer_data: &[buffer::Data],
     ) -> Result<Self>
     where
-        for<'a> S: ParseScheme + OpenScheme<S::Scheme<'a>>,
+        S: ResourceResolver<'a>,
     {
         #[cfg(feature = "guess_mime_type")]
         let guess_format = |encoded_image: &[u8]| match image_crate::guess_format(encoded_image) {
@@ -429,13 +481,13 @@ pub fn import_images(
     base: Option<&Path>,
     buffer_data: &[buffer::Data],
 ) -> Result<Vec<image::Data>> {
-    Importer::for_base(base).import_images(document, buffer_data)
+    Importer::with_base(base).import_images(document, buffer_data)
 }
 
 fn import_path(path: &Path) -> Result<Import> {
-    let base = path.parent().unwrap_or_else(|| Path::new("./"));
-    let importer = Importer::for_base(Some(base));
-    importer.import_path(path)
+    let reference = DefaultScheme::File(path);
+    let importer = Importer::<DefaultReferenceResolver>::with_base_from(&reference);
+    importer.import_reference(&reference)
 }
 
 /// Import glTF 2.0 from the file system.
@@ -503,7 +555,7 @@ pub fn import_slice<S>(slice: S) -> Result<Import>
 where
     S: AsRef<[u8]>,
 {
-    Importer::for_base(None).import_slice(slice.as_ref())
+    Importer::<DefaultReferenceResolver>::with_base(None).import_slice(slice.as_ref())
 }
 
 #[cfg(test)]
@@ -521,7 +573,7 @@ mod tests {
             DefaultScheme::Unsupported
         ));
         assert!(matches!(
-            DefaultSchemeHandler::default().open(&DefaultScheme::parse("%FF%FE")),
+            DefaultReferenceResolver::default().open(&DefaultScheme::parse("%FF%FE")),
             Err(Error::UnsupportedScheme)
         ));
     }
