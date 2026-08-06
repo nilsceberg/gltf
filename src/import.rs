@@ -162,9 +162,12 @@ pub trait ImporterExt: Importer {
 
 impl<T: Importer> ImporterExt for T {}
 
+/// TODO
 pub trait Resource: Read {
+    /// TODO
     fn media_type(&self) -> Option<&str>;
 
+    /// TODO
     fn into_bytes(mut self) -> io::Result<Vec<u8>>
     where
         Self: Sized,

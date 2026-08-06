@@ -173,7 +173,7 @@ pub use self::import::import_images;
 pub use self::import::import_slice;
 #[cfg(feature = "import")]
 #[doc(inline)]
-pub use self::import::{DataResource, FileResource, Importer, ImporterExt};
+pub use self::import::{DataResource, FileResource, Importer, ImporterExt, Resource};
 #[doc(inline)]
 pub use self::material::Material;
 #[doc(inline)]
